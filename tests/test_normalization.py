@@ -99,6 +99,8 @@ def test_variant_node_norm():
 
     node_normalizer = NodeNormalizer(strict_normalization=True)
     node_normalizer.normalize_sequence_variants(variant_nodes)
+    for node in variant_nodes:
+        print(node)
     assert len(variant_nodes) >= 10
     assert len(node_normalizer.variant_node_splits) == 1
 
