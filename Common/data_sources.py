@@ -20,6 +20,7 @@ HUMAN_GOA = 'HumanGOA'
 INTACT = 'IntAct'
 LITCOIN = 'LitCoin_without_umls_with_autocomplete'
 LITCOIN_SAPBERT = 'LitCoinSapBERT_without_umls'
+LITCOIN_ENTITY_EXTRACTOR = "LitCoinEntityExtractor"
 MONARCH_KG = 'MonarchKG'
 MONDO_PROPS = 'MONDOProps'
 ONTOLOGICAL_HIERARCHY = 'OntologicalHierarchy'
@@ -63,6 +64,7 @@ SOURCE_DATA_LOADER_CLASS_IMPORTS = {
     HUMAN_STRING: ("parsers.STRING.src.loadSTRINGDB", "HumanSTRINGDBLoader"),
     INTACT: ("parsers.IntAct.src.loadIA", "IALoader"),
     LITCOIN: ("parsers.LitCoin.src.loadLitCoin", "LitCoinLoader"),
+    LITCOIN_ENTITY_EXTRACTOR: ("parsers.LitCoin.src.loadLitCoin", "LitCoinEntityExtractorLoader"),
     LITCOIN_SAPBERT: ("parsers.LitCoin.src.loadLitCoin", "LitCoinSapBERTLoader"),
     MONARCH_KG: ("parsers.monarchkg.src.loadMonarchKG", "MonarchKGLoader"),
     MONDO_PROPS: ("parsers.MONDOProperties.src.loadMP", "MPLoader"),

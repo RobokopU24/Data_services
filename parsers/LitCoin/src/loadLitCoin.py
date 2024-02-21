@@ -13,10 +13,10 @@ from Common.normalization import call_name_resolution, NAME_RESOLVER_API_ERROR
 from Common.prefixes import PUBMED
 
 
-LLM_SUBJECT_NAME = 'entity_1'
-LLM_SUBJECT_TYPE = 'entity_1_type'
-LLM_OBJECT_NAME = 'entity_2'
-LLM_OBJECT_TYPE = 'entity_2_type'
+LLM_SUBJECT_NAME = 'subject'
+LLM_SUBJECT_TYPE = 'subject_type'
+LLM_OBJECT_NAME = 'object'
+LLM_OBJECT_TYPE = 'object_type'
 LLM_RELATIONSHIP = 'relationship'
 LLM_MAIN_FINDING = 'main_finding'
 
@@ -82,7 +82,7 @@ class LitCoinLoader(SourceDataLoader):
         super().__init__(test_mode=test_mode, source_data_dir=source_data_dir)
 
         self.data_url = 'https://stars.renci.org/var/data_services/litcoin/'
-        self.data_file = 'HEAL_2.7.23_gpt4_20231114.json'
+        self.data_file = 'abstracts_CompAndHeal_gpt4_20240205_train.json'
         self.data_files = [self.data_file]
         # dicts of name to id lookups organized by node type (node_name_to_id_lookup[node_type] = dict of names -> id)
         self.node_name_to_id_lookup = defaultdict(dict)
@@ -90,7 +90,7 @@ class LitCoinLoader(SourceDataLoader):
         self.bl_utils = BiolinkUtils()
 
     def get_latest_source_version(self) -> str:
-        latest_version = 'v1.1'
+        latest_version = 'v1.2'
         return latest_version
 
     def get_data(self) -> bool:
@@ -309,4 +309,42 @@ class LitCoinSapBERTLoader(LitCoinLoader):
             "types": [name_res_json['category']],
             "score": name_res_json['score']
         }
+
+
+class LitCoinEntityExtractorLoader(LitCoinLoader):
+    source_id: str = 'LitCoinEntityExtractor'
+    parsing_version: str = '1.1'
+
+    def parse_data(self) -> dict:
+        litcoin_file_path: str = os.path.join(self.data_path, self.data_file)
+        all_entities = {}
+        with open(litcoin_file_path) as litcoin_file:
+            litcoin_json = json.load(litcoin_file)
+            for litcoin_object in litcoin_json:
+                llm_output = litcoin_object['output']
+                for litcoin_edge in self.parse_llm_output(llm_output):
+                    subject_name = litcoin_edge[LLM_SUBJECT_NAME]
+                    subject_type = litcoin_edge[LLM_SUBJECT_TYPE]
+                    subject_mapped_type = NODE_TYPE_MAPPINGS.get(self.convert_node_type_to_biolink_format(subject_type),
+                                                                     None)
+                    all_entities[f'{subject_name}{subject_type}'] = {'name': subject_name,
+                                                                     'llm_type': subject_type,
+                                                                     'name_res_type': subject_mapped_type}
+                    object_name = litcoin_edge[LLM_OBJECT_NAME]
+                    object_type = litcoin_edge[LLM_OBJECT_TYPE]
+                    object_mapped_type = NODE_TYPE_MAPPINGS.get(self.convert_node_type_to_biolink_format(object_type),
+                                                                     None)
+                    all_entities[f'{object_name}{object_type}'] = {'name': object_name,
+                                                                   'llm_type': object_type,
+                                                                   'name_res_type': object_mapped_type}
+
+        with open(os.path.join(self.data_path, "..",
+                               f"parsed_{self.parsing_version}",
+                               "name_res_inputs.json"), "w") as name_res_inputs:
+            entities_output = {'all_entities': [entity for entity in all_entities.values()]}
+            name_res_inputs.write(json.dumps(entities_output, indent=4))
+        print(f'{len(all_entities.values())} unique entities extracted')
+        return {}
+
+
 
