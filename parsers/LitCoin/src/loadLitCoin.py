@@ -70,7 +70,7 @@ NODE_TYPE_MAPPINGS = {
 ##############
 class LitCoinLoader(SourceDataLoader):
 
-    source_id: str = 'LitCoin_without_umls_with_autocomplete'
+    source_id: str = 'LitCoin'
     provenance_id: str = 'infores:robokop-kg'  # TODO - change this to a LitCoin infores when it exists
     parsing_version: str = '1.6'
 
@@ -199,10 +199,8 @@ class LitCoinLoader(SourceDataLoader):
         preferred_biolink_node_type = NODE_TYPE_MAPPINGS.get(biolink_node_type, None)
         self.logger.info(f'calling name res for {node_name} - {preferred_biolink_node_type}')
         start_time = time.time()
-        self.logger.info(f'name res start time - {start_time}')
         name_resolution_results = self.name_resolution_function(node_name, preferred_biolink_node_type)
         elapsed_time = time.time() - start_time
-        self.logger.info(f'name res elapsed time - {elapsed_time}')
         standardized_name_res_result = self.standardize_name_resolution_results(name_resolution_results)
         self.name_res_stats.append(f"{node_name}\t{preferred_biolink_node_type}\t{elapsed_time}\n")
         self.node_name_to_id_lookup[node_type][node_name] = standardized_name_res_result
@@ -271,7 +269,7 @@ class LitCoinLoader(SourceDataLoader):
 
 
 class LitCoinSapBERTLoader(LitCoinLoader):
-    source_id: str = 'LitCoinSapBERT_without_umls'
+    source_id: str = 'LitCoinSapBERT'
     parsing_version: str = '1.4'
 
     def name_resolution_function(self, node_name, preferred_biolink_node_type, retries=0):
@@ -287,9 +285,7 @@ class LitCoinSapBERTLoader(LitCoinLoader):
             sapbert_json = sapbert_response.json()
             # return the first result if there is one
             if sapbert_json:
-                for result in sapbert_json:
-                    if not result['curie'].startswith('UMLS'):
-                        return result
+                return sapbert_json[0]
         else:
             error_message = f'Non-200 Sapbert result {sapbert_response.status_code} for request {sapbert_payload}.'
             if retries < 3:
@@ -343,7 +339,7 @@ class LitCoinEntityExtractorLoader(LitCoinLoader):
                                "name_res_inputs.json"), "w") as name_res_inputs:
             entities_output = {'all_entities': [entity for entity in all_entities.values()]}
             name_res_inputs.write(json.dumps(entities_output, indent=4))
-        print(f'{len(all_entities.values())} unique entities extracted')
+        self.logger.info(f'{len(all_entities.values())} unique entities extracted')
         return {}
 
 

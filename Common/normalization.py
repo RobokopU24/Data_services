@@ -1,6 +1,7 @@
 import os
 import logging
 import requests
+import time
 
 from robokop_genetics.genetics_normalization import GeneticsNormalizer
 from Common.node_types import *
@@ -522,21 +523,19 @@ def call_name_resolution(name: str, biolink_type: str, retries=0, logger=None):
     nameres_payload = {
         "string": name,
         "biolink_type": biolink_type if biolink_type else "",
-        "autocomplete": True,
-        "exclude_prefixes": "UMLS"
+        "autocomplete": False
     }
-    error_message = None
     try:
-        logger.info(f'About to call name res..')
+        # logger.info(f'About to call name res..')
         nameres_result = requests.get(NAME_RESOLVER_URL,
                                       params=nameres_payload,
                                       headers=NAME_RESOLVER_HEADERS,
-                                      timeout=180)
-        logger.info(f'Got result from name res {nameres_result.status_code}')
+                                      timeout=45)
+        # logger.info(f'Got result from name res {nameres_result.status_code}')
         if nameres_result.status_code == 200:
             # return the first result if there is one
             nameres_json = nameres_result.json()
-            logger.info(f'Unpacked json..')
+            # logger.info(f'Unpacked json..')
             return nameres_json[0] if nameres_json else None
         else:
             error_message = f'Non-200 result from name resolution (url: {NAME_RESOLVER_URL}, ' \
@@ -553,9 +552,10 @@ def call_name_resolution(name: str, biolink_type: str, retries=0, logger=None):
         logger.error(error_message)
     else:
         print(error_message)
-    if retries < 3:
+    if retries < 2:
+        time.sleep(5)
         logger.info('Retrying name resolution..')
         return call_name_resolution(name, biolink_type, retries + 1, logger)
 
-    # if retried 3 times already give up and return the last error
+    # if retried 2 times already give up and return the last error
     return {NAME_RESOLVER_API_ERROR: error_message}
