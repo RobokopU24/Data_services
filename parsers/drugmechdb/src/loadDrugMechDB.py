@@ -123,7 +123,31 @@ class DrugMechDBLoader(SourceDataLoader):
             drug_drugbank = entry["graph"]["drugbank"]
             disease_name = entry["graph"]["disease"]
             disease_mesh = entry["graph"]["disease_mesh"]
-            links  = entry["links"] 
+            links  = entry["links"]
+    
+            ### Add "biolink:treats_or_applied_or_studied_to_treat" edges between the drug and disease in each indication path.
+            source_target_pair_dict["dmdb_ids"].append(dmdb_id)
+
+            source = drug_drugbank
+            fixed_source = self.fix_node(source,node_mapping)
+            source_target_pair_dict["source_ids"].append(fixed_source)
+            output_node = kgxnode(fixed_source)
+            self.output_file_writer.write_kgx_node(output_node)
+
+            target = disease_mesh
+            fixed_target = self.fix_node(target,node_mapping)
+            source_target_pair_dict["target_ids"].append(fixed_target)
+            output_node = kgxnode(fixed_target)
+            self.output_file_writer.write_kgx_node(output_node)
+
+            source_target_pair_dict["qualified_predicates"].append("")
+            source_target_pair_dict["object_direction_qualifiers"].append("")
+            source_target_pair_dict["object_aspect_qualifiers"].append("")
+            
+            predicate = "biolink:treats_or_applied_or_studied_to_treat"
+            source_target_pair_dict["predicates"].append(predicate)
+            
+            ### Add all explicitly described links in indication path.
             for i in range(len(links)):
                 triple = links[i]
 
