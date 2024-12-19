@@ -60,14 +60,11 @@ class CTKPLoader(SourceDataLoader):
         """
         super().__init__(test_mode=test_mode, source_data_dir=source_data_dir)
 
-        # until we can use the manifest to determine versions and source data file locations we'll hard code it
-        self.node_file_name = 'clinical_trials_kg_nodes_v2.2.10.tsv'
-        self.edge_file_name = 'clinical_trials_kg_edges_v2.2.10.tsv'
+        # Get latest source version from the manifest and use it to name node and edge files.
+        self.latest_version = self.get_manifest()['version']
+        self.node_file_name = f'clinical_trials_kg_nodes_v{self.latest_version}.tsv'
+        self.edge_file_name = f'clinical_trials_kg_edges_v{self.latest_version}.tsv'
         self.data_url = "https://db.systemsbiology.net/gestalt/KG/"
-
-        # once we use the manifest, we'll rename the files while downloading and they can be called something generic
-        # self.node_file_name = 'nodes.tsv'
-        # self.edge_file_name = 'edges.tsv'
 
         self.data_files = [
             self.node_file_name,
@@ -80,14 +77,12 @@ class CTKPLoader(SourceDataLoader):
         self.source_record_url = "https://db.systemsbiology.net/gestalt/cgi-pub/KGinfo.pl?id="
 
     def get_latest_source_version(self) -> str:
-        latest_version = "2.2.10"
-        # we'd like to do this but for now we're using the dev version which is not in the manifest
-        # latest_version = self.get_manifest()['version']
+        latest_version = self.get_manifest()['version']
         return latest_version
 
     @staticmethod
     def get_manifest():
-        manifest_response = requests.get('https://github.com/multiomicsKP/clinical_trials_kp/blob/main/manifest.json')
+        manifest_response = requests.get('https://raw.githubusercontent.com/multiomicsKP/clinical_trials_kp/refs/heads/main/manifest.json')
         if manifest_response.status_code == 200:
             manifest = manifest_response.json()
             return manifest
