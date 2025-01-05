@@ -5,6 +5,7 @@ BINDING_DB = 'BINDING-DB'
 CAM_KP = 'CAM-KP'
 CHEBI_PROPERTIES = 'CHEBIProps'
 CLINICAL_TRIALS_KP = 'ClinicalTrialsKP'
+CLINGEN_VARIANT_PATHOGENICITY = 'ClinGenVariantPathogenicity'
 CORD19 = 'Cord19'
 CTD = 'CTD'
 DRUG_CENTRAL = 'DrugCentral'
@@ -55,6 +56,7 @@ SOURCE_DATA_LOADER_CLASS_IMPORTS = {
     CAM_KP: ("parsers.camkp.src.loadCAMKP", "CAMKPLoader"),
     CHEBI_PROPERTIES: ("parsers.chebi.src.loadChebiProperties", "ChebiPropertiesLoader"),
     CLINICAL_TRIALS_KP: ("parsers.clinicaltrials.src.loadCTKP", "CTKPLoader"),
+    CLINGEN_VARIANT_PATHOGENICITY: ("parsers.ClinGenVariantPathogenicity.src.loadClinGenVariantPathogenicity", "ClinGenVariantPathogenicityLoader"),
     CORD19: ("parsers.cord19.src.loadCord19", "Cord19Loader"),
     CTD: ("parsers.CTD.src.loadCTD", "CTDLoader"),
     DRUG_CENTRAL: ("parsers.drugcentral.src.loaddrugcentral", "DrugCentralLoader"),

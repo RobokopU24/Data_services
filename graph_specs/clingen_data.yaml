@@ -1,0 +1,9 @@
+# testing graph spec
+graphs:
+  - graph_id: clingen_data
+    graph_name: clingen_data
+    graph_description: 'A fake description for the testing baseline!'
+    graph_url: 'http://localhost/fake_graph_url_for_tesing_baseline'
+    output_format: none
+    sources:
+      - source_id: ClinGenVariantPathogenicity
