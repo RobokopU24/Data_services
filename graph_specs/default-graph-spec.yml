@@ -3,8 +3,8 @@ graphs:
 
   - graph_id: Baseline
     # optional parameters to be applied to the entire graph - see README for more info
-    # node_normalization_version: latest
-    # edge_normalization_version: latest
+    # node_normalization_version: 2.3.5
+    # edge_normalization_version: 4.2.5
     # graph_name: Robokop Baseline
     # graph_description: 'The baseline graph from which RobokopKG and other graphs are built.'
     # conflation: True # (whether to conflate node types like Genes and Proteins)

@@ -17,7 +17,7 @@ export ORION_LOGS="$PWD/../ORION_logs/"
 #Use EITHER of the following, ORION_GRAPH_SPEC or ORION_GRAPH_SPEC_URL
 
 #ORION_GRAPH_SPEC - the name of a Graph Spec file located in the graph_specs directory of ORION
-export ORION_GRAPH_SPEC=testing-graph-spec.yml
+export ORION_GRAPH_SPEC=example-graph-spec.yaml
 
 #ORION_GRAPH_SPEC_URL - a URL pointing to a Graph Spec file
 #export ORION_GRAPH_SPEC_URL=https://raw.githubusercontent.com/RENCI-AUTOMAT/ORION/helm_deploy/graph_specs/yeast-graph-spec.yml

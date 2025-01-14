@@ -43,10 +43,12 @@ class KGXFileMerger:
         primary_sources = []
         secondary_sources = []
         for graph_source in chain(graph_spec.sources, graph_spec.subgraphs):
-            if graph_source.merge_strategy == 'default':
+            if not graph_source.merge_strategy:
                 primary_sources.append(graph_source)
             elif graph_source.merge_strategy == 'connected_edge_subset':
                 secondary_sources.append(graph_source)
+            else:
+                return {'merge_error': f'Unsupported merge strategy specified: {graph_source.merge_strategy}'}
 
         # TODO we should be able to process a single primary source more efficiently (ie copy and paste it)
         # if len(primary_sources) == 1:
@@ -73,8 +75,9 @@ class KGXFileMerger:
             all_source_ids = [graph_source.id for graph_source in chain(graph_spec.sources, graph_spec.subgraphs)]
             missing_data_sets = [source_id for source_id in all_source_ids if
                                  source_id not in merge_metadata['sources'].keys()]
-            self.logger.error(f"Error merging graph {graph_spec.graph_id}! could not merge: {missing_data_sets}")
-
+            error_message = f"Error merging graph {graph_spec.graph_id}! could not merge: {missing_data_sets}"
+            self.logger.error(error_message)
+            merge_metadata["merge_error"] = error_message
         return merge_metadata
 
     def merge_primary_sources(self,

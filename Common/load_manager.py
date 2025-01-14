@@ -1,9 +1,11 @@
 import os
 import argparse
 import datetime
+import time
 from collections import defaultdict
 
 from Common.data_sources import SourceDataLoaderClassFactory, RESOURCE_HOGS, get_available_data_sources
+from Common.exceptions import DataVersionError
 from Common.utils import LoggingUtil, GetDataPullError
 from Common.kgx_file_normalizer import KGXFileNormalizer
 from Common.normalization import NormalizationScheme, NodeNormalizer, EdgeNormalizer, NormalizationFailedError
@@ -124,7 +126,7 @@ class SourceDataManager:
             self.logger.info(f"Fetching source data for {source_id} (version: {source_version})...")
             return self.fetch_source(source_id, source_version=source_version)
 
-    def get_latest_source_version(self, source_id: str, retries: int=0):
+    def get_latest_source_version(self, source_id: str, retries: int = 0):
         if source_id in self.latest_source_version_lookup:
             return self.latest_source_version_lookup[source_id]
 
@@ -136,19 +138,18 @@ class SourceDataManager:
             self.latest_source_version_lookup[source_id] = latest_source_version
             return latest_source_version
         except GetDataPullError as failed_error:
-            self.logger.error(
-                f"Error while checking for latest source version for {source_id}: {failed_error.error_message}")
+            error_message = f"Error while checking for latest source version for {source_id}: " \
+                            f"{failed_error.error_message}"
+            self.logger.error(error_message)
             if retries < 2:
+                time.sleep(3)
                 return self.get_latest_source_version(source_id, retries=retries+1)
             else:
-                # TODO what should we do here?
-                # no great place to write an error in metadata because metadata is specific to source versions
-                # source_metadata.set_version_checking_error(failed_error.error_message)
-                return None
+                raise DataVersionError(error_message=error_message)
         except Exception as e:
-            self.logger.error(
-                f"Error while checking for latest source version for {source_id}: {repr(e)}-{str(e)}")
-            return None
+            error_message = f"Error while checking for latest source version for {source_id}: {repr(e)}-{str(e)}"
+            self.logger.error(error_message)
+            raise DataVersionError(error_message=error_message)
 
     def fetch_source(self, source_id: str, source_version: str='latest', retries: int=0):
 
@@ -503,20 +504,18 @@ class SourceDataManager:
                                   parsing_version: str,
                                   supplementation_version: str,
                                   normalization_scheme: NormalizationScheme):
-        # source data QC here
-        source_metadata = self.get_source_metadata(source_id, source_version)
-        normalization_version = normalization_scheme.get_composite_normalization_version()
+        # source data QC should go here
 
         self.logger.info(f'Generating release for {source_id}')
+        source_metadata = self.get_source_metadata(source_id, source_version)
         loader = SOURCE_DATA_LOADER_CLASSES[source_id](test_mode=self.test_mode)
         source_meta_information = loader.get_source_meta_information()
-        source_metadata.generate_release_metadata(parsing_version=parsing_version,
-                                                  supplementation_version=supplementation_version,
-                                                  normalization_version=normalization_version,
-                                                  source_meta_information=source_meta_information)
-        return source_metadata.get_release_version(parsing_version=parsing_version,
-                                                   supplementation_version=supplementation_version,
-                                                   normalization_version=normalization_version)
+        normalization_version = normalization_scheme.get_composite_normalization_version()
+        release_version = source_metadata.generate_release_metadata(parsing_version=parsing_version,
+                                                                    supplementation_version=supplementation_version,
+                                                                    normalization_version=normalization_version,
+                                                                    source_meta_information=source_meta_information)
+        return release_version
 
     def get_source_metadata(self, source_id: str, source_version):
         if source_id not in self.source_metadata or source_version not in self.source_metadata[source_id]:

@@ -3,12 +3,14 @@ import yaml
 import argparse
 import datetime
 import requests
-import json
+
+from pathlib import Path
 from xxhash import xxh64_hexdigest
 from collections import defaultdict
 from Common.biolink_utils import BiolinkInformationResources, INFORES_STATUS_INVALID, INFORES_STATUS_DEPRECATED
-from Common.utils import LoggingUtil, quick_jsonl_file_iterator
+from Common.utils import LoggingUtil, quick_jsonl_file_iterator, GetDataPullError
 from Common.data_sources import get_available_data_sources
+from Common.exceptions import DataVersionError, GraphSpecError
 from Common.load_manager import SourceDataManager
 from Common.kgx_file_merger import KGXFileMerger
 from Common.neo4j_tools import create_neo4j_dump
@@ -29,45 +31,54 @@ COLLAPSED_QUALIFIERS_FILENAME = 'collapsed_qualifier_edges.jsonl'
 
 class GraphBuilder:
 
-    def __init__(self):
+    def __init__(self,
+                 graph_specs_dir=None):
 
         self.logger = LoggingUtil.init_logging("ORION.Common.GraphBuilder",
                                                line_format='medium',
                                                log_file_path=os.environ['ORION_LOGS'])
 
-        self.current_graph_versions = {}
-        self.graphs_dir = self.init_graphs_dir()  # path to the graphs output directory
+        self.graphs_dir = self.get_graphs_dir()  # path to the graphs output directory
         self.source_data_manager = SourceDataManager()  # access to the data sources and their metadata
-        self.graph_specs = self.load_graph_specs()  # list of graphs to build (GraphSpec objects)
+        self.graph_specs = {}   # graph_id -> GraphSpec all potential graphs that could be built, including sub-graphs
+        self.load_graph_specs(graph_specs_dir=graph_specs_dir)
         self.build_results = {}
 
-    def build_graph(self, graph_id: str):
+    def build_graph(self, graph_spec: GraphSpec):
 
-        self.logger.info(f'Building graph {graph_id}. Checking dependencies...')
-        graph_spec = self.get_graph_spec(graph_id)
-        if self.build_dependencies(graph_spec):
-            self.logger.info(f'Building graph {graph_id}. Dependencies are ready...')
-        else:
-            self.logger.warning(f'Aborting graph {graph_spec.graph_id}, building dependencies failed.')
-            return
+        graph_id = graph_spec.graph_id
+        self.logger.info(f'Building graph {graph_id}...')
 
-        # check the status for previous builds of this version
-        graph_version = graph_spec.graph_version
+        graph_version = self.determine_graph_version(graph_spec)
         graph_metadata = self.get_graph_metadata(graph_id, graph_version)
+        graph_output_dir = self.get_graph_dir_path(graph_id, graph_version)
+
+        # check for previous builds of this same graph
         build_status = graph_metadata.get_build_status()
         if build_status == Metadata.IN_PROGRESS:
-            self.logger.info(f'Graph {graph_id} version {graph_version} is already in progress. Skipping..')
-            return
+            self.logger.info(f'Graph {graph_id} version {graph_version} has status: in progress. '
+                             f'This means either the graph is already in the process of being built, '
+                             f'or an error occurred previously that could not be handled. '
+                             f'You may need to clean up and/or remove the failed build.')
+            return False
 
         if build_status == Metadata.BROKEN or build_status == Metadata.FAILED:
             self.logger.info(f'Graph {graph_id} version {graph_version} previously failed to build. Skipping..')
-            return
+            return False
 
-        graph_output_dir = self.get_graph_dir_path(graph_id, graph_version)
-        if build_status != Metadata.STABLE:
-
+        if build_status == Metadata.STABLE:
+            self.logger.info(f'Graph {graph_id} version {graph_version} was already built.')
+            return True
+        else:
             # if we get here we need to build the graph
-            self.logger.info(f'Building graph {graph_id} version {graph_version}. Merging sources...')
+            self.logger.info(f'Building graph {graph_id} version {graph_version}, checking dependencies...')
+            if not self.build_dependencies(graph_spec):
+                self.logger.warning(f'Aborting graph {graph_spec.graph_id} version {graph_version}, building '
+                                    f'dependencies failed.')
+                return False
+
+            self.logger.info(f'Building graph {graph_id} version {graph_version}. '
+                             f'Dependencies ready, merging sources...')
             graph_metadata.set_build_status(Metadata.IN_PROGRESS)
             graph_metadata.set_graph_version(graph_version)
             graph_metadata.set_graph_name(graph_spec.graph_name)
@@ -85,16 +96,14 @@ class GraphBuilder:
             if "merge_error" in merge_metadata:
                 graph_metadata.set_build_error(merge_metadata["merge_error"], current_time)
                 graph_metadata.set_build_status(Metadata.FAILED)
-                self.logger.error(f'Error building graph {graph_id}.')
-                return
+                self.logger.error(f'Merge error occured while building graph {graph_id}: '
+                                  f'{merge_metadata["merge_error"]}')
+                return False
 
             graph_metadata.set_build_info(merge_metadata, current_time)
             graph_metadata.set_build_status(Metadata.STABLE)
             self.logger.info(f'Building graph {graph_id} complete!')
             self.build_results[graph_id] = {'version': graph_version, 'success': True}
-        else:
-            self.logger.info(f'Graph {graph_id} version {graph_version} was already built.')
-            self.build_results[graph_id] = {'version': graph_version, 'success': False}
 
         if not graph_metadata.has_qc():
             self.logger.info(f'Running QC for graph {graph_id}...')
@@ -103,8 +112,8 @@ class GraphBuilder:
             if qc_results['pass']:
                 self.logger.info(f'QC passed for graph {graph_id}.')
             else:
-                self.logger.info(f'QC failed for graph {graph_id}, bailing..')
-                return
+                self.logger.warning(f'QC failed for graph {graph_id}.')
+                self.build_results[graph_id] = {'version': graph_version, 'success': False}
 
         needs_meta_kg = not self.has_meta_kg(graph_directory=graph_output_dir)
         needs_test_data = not self.has_test_data(graph_directory=graph_output_dir)
@@ -136,7 +145,7 @@ class GraphBuilder:
                                              logger=self.logger)
 
             if dump_success:
-                graph_output_url = self.get_graph_output_URL(graph_id, graph_version)
+                graph_output_url = self.get_graph_output_url(graph_id, graph_version)
                 graph_metadata.set_dump_url(f'{graph_output_url}graph_{graph_version}_redundant.db.dump')
             
         if 'collapsed_qualifiers_jsonl' in output_formats:
@@ -157,7 +166,7 @@ class GraphBuilder:
                                              logger=self.logger)
 
             if dump_success:
-                graph_output_url = self.get_graph_output_URL(graph_id, graph_version)
+                graph_output_url = self.get_graph_output_url(graph_id, graph_version)
                 graph_metadata.set_dump_url(f'{graph_output_url}graph_{graph_version}_collapsed_qualifiers.db.dump')
 
         if 'neo4j' in output_formats:
@@ -170,68 +179,119 @@ class GraphBuilder:
                                              logger=self.logger)
 
             if dump_success:
-                graph_output_url = self.get_graph_output_URL(graph_id, graph_version)
+                graph_output_url = self.get_graph_output_url(graph_id, graph_version)
                 graph_metadata.set_dump_url(f'{graph_output_url}graph_{graph_version}.db.dump')
+    
+        return True
 
+    # determine a graph version utilizing versions of data sources, or just return the graph version specified
+    def determine_graph_version(self, graph_spec: GraphSpec):
+        # if the version was set or previously determined just back out
+        if graph_spec.graph_version:
+            return graph_spec.graph_version
+        try:
+            # go out and find the latest version for any data source that doesn't have a version specified
+            for source in graph_spec.sources:
+                if not source.source_version:
+                    source.source_version = self.source_data_manager.get_latest_source_version(source.id)
+                self.logger.info(f'Source version - {source.id}: {source.version}')
+
+            # for sub-graphs, if a graph version isn't specified,
+            # use the graph spec for that subgraph to determine a graph version
+            for subgraph in graph_spec.subgraphs:
+                if not subgraph.graph_version:
+                    subgraph_graph_spec = self.graph_specs.get(subgraph.id, None)
+                    if subgraph_graph_spec:
+                        subgraph.graph_version = self.determine_graph_version(subgraph_graph_spec)
+                        self.logger.info(f'found subgraph version, {graph_spec.graph_id}: {subgraph.graph_version}')
+                    else:
+                        raise GraphSpecError(f'Subgraph {subgraph.id} requested for graph {graph_spec.graph_id} '
+                                             f'but the version was not specified and could not be determined without '
+                                             f'a graph spec for {subgraph.id}.')
+        except (GetDataPullError, DataVersionError) as e:
+            raise GraphSpecError(error_message=e.error_message)
+
+        # make a string that is a composite of versions and their merge strategy for each source
+        composite_version_string = ""
+        if graph_spec.sources:
+            composite_version_string += '_'.join([graph_source.version + '_' + graph_source.merge_strategy
+                                                  if graph_source.merge_strategy else graph_source.version
+                                                  for graph_source in graph_spec.sources])
+        if graph_spec.subgraphs:
+            if composite_version_string:
+                composite_version_string += '_'
+            composite_version_string += '_'.join([sub_graph_source.version + '_' + sub_graph_source.merge_strategy
+                                                  if sub_graph_source.merge_strategy else sub_graph_source.version
+                                                  for sub_graph_source in graph_spec.subgraphs])
+        graph_version = xxh64_hexdigest(composite_version_string)
+        graph_spec.graph_version = graph_version
+        self.logger.info(f'Version determined for graph {graph_spec.graph_id}: {graph_version} ({composite_version_string})')
+        return graph_version
+
+    
     def build_dependencies(self, graph_spec: GraphSpec):
+        graph_id = graph_spec.graph_id
         for subgraph_source in graph_spec.subgraphs:
             subgraph_id = subgraph_source.id
             subgraph_version = subgraph_source.version
-            if self.check_for_existing_graph_dir(subgraph_id, subgraph_version):
-                # load previous metadata
-                subgraph_source.graph_metadata = self.get_graph_metadata(subgraph_id, subgraph_version)
-            elif self.current_graph_versions[subgraph_id] == subgraph_version:
-                self.logger.warning(f'For graph {graph_spec.graph_id} subgraph dependency '
-                                    f'{subgraph_id} version {subgraph_version} is not ready. Building now...')
-                self.build_graph(subgraph_id)
-            else:
-                self.logger.warning(f'Building graph {graph_spec.graph_id} failed, '
-                                    f'subgraph {subgraph_id} had version {subgraph_version} specified, '
-                                    f'but that version of the graph was not found in the graphs directory.')
-                return False
+            if not self.check_for_existing_graph_dir(subgraph_id, subgraph_version):
+                # If the subgraph doesn't already exist, we need to make sure it matches the current version of the
+                # subgraph as generated by the current graph spec, otherwise we won't be able to build it.
+                subgraph_graph_spec = self.graph_specs.get(subgraph_id, None)
+                if not subgraph_graph_spec:
+                    self.logger.warning(f'Subgraph {subgraph_id} version {subgraph_version} was requested for graph '
+                                        f'{graph_id} but it was not found and could not be built without a Graph Spec.')
+                    return False
 
-            graph_metadata = self.get_graph_metadata(subgraph_id, subgraph_version)
-            if graph_metadata.get_build_status() == Metadata.STABLE:
-                # we found the sub graph and it's stable - update the GraphSource in preparation for building the graph
+                if subgraph_version != subgraph_graph_spec.graph_version:
+                    self.logger.error(f'Subgraph {subgraph_id} version {subgraph_version} was specified, but that '
+                                      f'version of the graph could not be found. It can not be built now because the '
+                                      f'current version is {subgraph_graph_spec.graph_version}. Either specify a '
+                                      f'version that is already built, or remove the subgraph version specification to '
+                                      f'automatically include the latest one.')
+                    return False
+
+                # here the graph specs and versions all look right, but we still need to build the subgraph
+                self.logger.warning(f'Graph {graph_id}, subgraph dependency {subgraph_id} is not ready. Building now..')
+                subgraph_build_success = self.build_graph(subgraph_graph_spec)
+                if not subgraph_build_success:
+                    return False
+
+            # confirm the subgraph build worked and update the DataSource object in preparation for merging
+            subgraph_metadata = self.get_graph_metadata(subgraph_id, subgraph_version)
+            subgraph_source.graph_metadata = subgraph_metadata
+            if subgraph_metadata.get_build_status() == Metadata.STABLE:
                 subgraph_dir = self.get_graph_dir_path(subgraph_id, subgraph_version)
                 subgraph_nodes_path = self.get_graph_nodes_file_path(subgraph_dir)
                 subgraph_edges_path = self.get_graph_edges_file_path(subgraph_dir)
                 subgraph_source.file_paths = [subgraph_nodes_path, subgraph_edges_path]
             else:
-                self.logger.warning(
-                    f'Attempting to build graph {graph_spec.graph_id} failed, dependency '
-                    f'subgraph {subgraph_id} version {subgraph_version} was not built successfully.')
+                self.logger.warning(f'Attempting to build graph {graph_id} failed, dependency subgraph {subgraph_id} '
+                                    f'version {subgraph_version} was not built successfully.')
                 return False
 
         for data_source in graph_spec.sources:
             source_id = data_source.id
-            if source_id not in get_available_data_sources():
-                self.logger.warning(
-                    f'Attempting to build graph {graph_spec.graph_id} failed: '
-                    f'{source_id} is not a valid data source id. ')
-                return False
-
             source_metadata: SourceMetadata = self.source_data_manager.get_source_metadata(source_id,
                                                                                            data_source.source_version)
-            release_version = source_metadata.get_release_version(parsing_version=data_source.parsing_version,
-                                                                  normalization_version=data_source.normalization_scheme.get_composite_normalization_version(),
-                                                                  supplementation_version=data_source.supplementation_version)
-            if release_version is None:
+            release_version = data_source.generate_version()
+            release_metadata = source_metadata.get_release_info(release_version)
+            if release_metadata is None:
                 self.logger.info(
-                    f'Attempting to build graph {graph_spec.graph_id}, '
+                    f'Attempting to build graph {graph_id}, '
                     f'dependency {source_id} is not ready. Building now...')
-                release_version = self.source_data_manager.run_pipeline(source_id,
+                pipeline_sucess = self.source_data_manager.run_pipeline(source_id,
                                                                         source_version=data_source.source_version,
                                                                         parsing_version=data_source.parsing_version,
                                                                         normalization_scheme=data_source.normalization_scheme,
                                                                         supplementation_version=data_source.supplementation_version)
-                if not release_version:
-                    self.logger.info(
-                        f'While attempting to build {graph_spec.graph_id}, dependency pipeline failed for {source_id}...')
+                if not pipeline_sucess:
+                    self.logger.info(f'While attempting to build {graph_spec.graph_id}, '
+                                     f'data source pipeline failed for dependency {source_id}...')
                     return False
+                release_metadata = source_metadata.get_release_info(release_version)
 
-            data_source.version = release_version
-            data_source.release_info = source_metadata.get_release_info(release_version)
+            data_source.release_info = release_metadata
             data_source.file_paths = self.source_data_manager.get_final_file_paths(source_id,
                                                                                    data_source.source_version,
                                                                                    data_source.parsing_version,
@@ -333,68 +393,71 @@ class GraphBuilder:
             qc_metadata['warnings']['invalid_knowledge_sources'] = invalid_infores_ids
         return qc_metadata
 
-    def load_graph_specs(self):
-        if 'ORION_GRAPH_SPEC' in os.environ and os.environ['ORION_GRAPH_SPEC']:
-            # this is a messy way to find the graph spec path, mainly for testing - URL is preferred
-            graph_spec_file = os.environ['ORION_GRAPH_SPEC']
-            graph_spec_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'graph_specs', graph_spec_file)
+    def load_graph_specs(self, graph_specs_dir=None):
+        graph_spec_file = os.environ.get('ORION_GRAPH_SPEC', None)
+        graph_spec_url = os.environ.get('ORION_GRAPH_SPEC_URL', None)
+
+        if graph_spec_file and graph_spec_url:
+            raise GraphSpecError(f'Configuration Error - the environment variables ORION_GRAPH_SPEC and '
+                                 f'ORION_GRAPH_SPEC_URL were set. Please choose one or the other. See the README for '
+                                 f'details.')
+
+        if graph_spec_file:
+            if not graph_specs_dir:
+                graph_specs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'graph_specs')
+            graph_spec_path = os.path.join(graph_specs_dir, graph_spec_file)
             if os.path.exists(graph_spec_path):
                 self.logger.info(f'Loading graph spec: {graph_spec_file}')
                 with open(graph_spec_path) as graph_spec_file:
-                    graph_spec_yaml = yaml.full_load(graph_spec_file)
-                    return self.parse_graph_spec(graph_spec_yaml)
+                    graph_spec_yaml = yaml.safe_load(graph_spec_file)
+                    self.parse_graph_spec(graph_spec_yaml)
+                    return
             else:
-                raise Exception(f'Configuration Error - Graph Spec could not be found: {graph_spec_file}')
-        elif 'ORION_GRAPH_SPEC_URL' in os.environ:
-            graph_spec_url = os.environ['ORION_GRAPH_SPEC_URL']
+                raise GraphSpecError(f'Configuration Error - Graph Spec could not be found: {graph_spec_file}')
+
+        if graph_spec_url:
             graph_spec_request = requests.get(graph_spec_url)
             graph_spec_request.raise_for_status()
-            graph_spec_yaml = yaml.full_load(graph_spec_request.text)
-            return self.parse_graph_spec(graph_spec_yaml)
-        else:
-            raise Exception(f'Configuration Error - No Graph Spec was configured. Set the environment variable '
-                            f'ORION_GRAPH_SPEC_URL to a URL with a valid Graph Spec yaml file. '
-                            f'See the README for more info.')
+            graph_spec_yaml = yaml.safe_load(graph_spec_request.text)
+            self.parse_graph_spec(graph_spec_yaml)
+            return
+
+        raise GraphSpecError(f'Configuration Error - No Graph Spec was configured. Set the environment variable '
+                             f'ORION_GRAPH_SPEC to the name of a graph spec included in this package, or '
+                             f'ORION_GRAPH_SPEC_URL to a URL of a valid Graph Spec yaml file. '
+                             f'See the README for more info.')
 
     def parse_graph_spec(self, graph_spec_yaml):
-        graph_specs = []
-        graph_id = ""
+        graph_id = None
         try:
             for graph_yaml in graph_spec_yaml['graphs']:
                 graph_id = graph_yaml['graph_id']
-                graph_name = graph_yaml['graph_name'] if 'graph_name' in graph_yaml else ""
-                graph_description = graph_yaml['graph_description'] if 'graph_description' in graph_yaml else ""
-                graph_url = graph_yaml['graph_url'] if 'graph_url' in graph_yaml else ""
+                graph_name = graph_yaml.get('graph_name', '')
+                graph_description = graph_yaml.get('graph_description', '')
+                graph_url = graph_yaml.get('graph_url', '')
 
                 # parse the list of data sources
-                data_sources = [self.parse_data_source_spec(data_source) for data_source in graph_yaml['sources']] \
-                    if 'sources' in graph_yaml else []
+                data_sources = [self.parse_data_source_spec(data_source)
+                                for data_source in graph_yaml.get('sources', [])]
 
                 # parse the list of subgraphs
-                subgraph_sources = [self.parse_subgraph_spec(subgraph) for subgraph in graph_yaml['subgraphs']] \
-                    if 'subgraphs' in graph_yaml else []
+                subgraph_sources = [self.parse_subgraph_spec(subgraph)
+                                    for subgraph in graph_yaml.get('subgraphs', [])]
 
                 if not data_sources and not subgraph_sources:
-                    self.logger.error(f'Error: No sources were provided for graph: {graph_id}.')
-                    continue
+                    raise GraphSpecError('Error: No sources were provided for graph: {graph_id}.')
 
-                # take any normalization scheme parameters specified at the graph level
-                graph_wide_node_norm_version = graph_yaml['node_normalization_version'] \
-                    if 'node_normalization_version' in graph_yaml else None
+                # see if there are any normalization scheme parameters specified at the graph level
+                graph_wide_node_norm_version = graph_yaml.get('node_normalization_version', None)
+                graph_wide_edge_norm_version = graph_yaml.get('edge_normalization_version', None)
+                graph_wide_conflation = graph_yaml.get('conflation', None)
+                graph_wide_strict_norm = graph_yaml.get('strict_normalization', None)
                 if graph_wide_node_norm_version == 'latest':
                     graph_wide_node_norm_version = self.source_data_manager.get_latest_node_normalization_version()
-                graph_wide_edge_norm_version = graph_yaml['edge_normalization_version'] \
-                    if 'edge_normalization_version' in graph_yaml else None
                 if graph_wide_edge_norm_version == 'latest':
                     graph_wide_edge_norm_version = self.source_data_manager.get_latest_edge_normalization_version()
-                graph_wide_conflation = graph_yaml['conflation'] \
-                    if 'conflation' in graph_yaml else None
-                graph_wide_strict_norm = graph_yaml['strict_normalization'] \
-                    if 'strict_normalization' in graph_yaml else None
-                graph_wide_normalization_code_version = graph_yaml['normalization_code_version'] \
-                    if 'normalization_code_version' in graph_yaml else None
 
-                # apply them to all of the data sources, this will overwrite anything defined at the source level
+                # apply them to all the data sources, this will overwrite anything defined at the source level
                 for data_source in data_sources:
                     if graph_wide_node_norm_version is not None:
                         data_source.normalization_scheme.node_normalization_version = graph_wide_node_norm_version
@@ -404,107 +467,101 @@ class GraphBuilder:
                         data_source.normalization_scheme.conflation = graph_wide_conflation
                     if graph_wide_strict_norm is not None:
                         data_source.normalization_scheme.strict = graph_wide_strict_norm
-                    if graph_wide_normalization_code_version is not None:
-                        data_source.normalization_scheme.normalization_code_version = graph_wide_normalization_code_version
 
-                graph_output_format = graph_yaml['output_format'] if 'output_format' in graph_yaml else ""
-                current_graph_spec = GraphSpec(graph_id=graph_id,
-                                               graph_name=graph_name,
-                                               graph_description=graph_description,
-                                               graph_url=graph_url,
-                                               graph_version=None,  # this will get populated later
-                                               graph_output_format=graph_output_format,
-                                               subgraphs=subgraph_sources,
-                                               sources=data_sources)
-                graph_version = self.generate_graph_version(current_graph_spec)
-                current_graph_spec.graph_version = graph_version
-                self.current_graph_versions[graph_id] = graph_version
-                graph_specs.append(current_graph_spec)
-        except Exception as e:
-            self.logger.error(f'Error parsing Graph Spec ({graph_id}), formatting error or missing information: {repr(e)}')
-            raise e
-        return graph_specs
+                graph_output_format = graph_yaml.get('output_format', '')
+                graph_spec = GraphSpec(graph_id=graph_id,
+                                       graph_name=graph_name,
+                                       graph_description=graph_description,
+                                       graph_url=graph_url,
+                                       graph_version=None,  # this will get populated when a build is triggered
+                                       graph_output_format=graph_output_format,
+                                       subgraphs=subgraph_sources,
+                                       sources=data_sources)
+                self.graph_specs[graph_id] = graph_spec
+        except KeyError as e:
+            error_message = f'Graph Spec missing required field: {e}'
+            if graph_id is not None:
+                error_message += f"(in graph {graph_id})"
+            raise GraphSpecError(error_message)
 
     def parse_subgraph_spec(self, subgraph_yml):
         subgraph_id = subgraph_yml['graph_id']
-        subgraph_version = subgraph_yml['graph_version'] if 'graph_version' in subgraph_yml else 'current'
-        if subgraph_version == 'current':
-            if subgraph_id in self.current_graph_versions:
-                subgraph_version = self.current_graph_versions[subgraph_id]
-            else:
-                raise Exception(f'Graph Spec Error - Could not determine version of subgraph {subgraph_id}. '
-                                f'Either specify an existing version, already built in your graphs directory, '
-                                f'or the subgraph must be defined previously in the same Graph Spec.')
-        merge_strategy = subgraph_yml['merge_strategy'] if 'merge_strategy' in subgraph_yml else 'default'
+        subgraph_version = subgraph_yml.get('graph_version', None)
+        merge_strategy = subgraph_yml.get('merge_strategy', None)
+        if merge_strategy == 'default':
+            merge_strategy = None
         subgraph_source = SubGraphSource(id=subgraph_id,
-                                         version=subgraph_version,
+                                         graph_version=subgraph_version,
                                          merge_strategy=merge_strategy)
         return subgraph_source
 
     def parse_data_source_spec(self, source_yml):
+        # get the source id and make sure it's valid
         source_id = source_yml['source_id']
         if source_id not in get_available_data_sources():
             error_message = f'Data source {source_id} is not a valid data source id.'
             self.logger.error(error_message + " " +
                               f'Valid sources are: {", ".join(get_available_data_sources())}')
-            raise Exception(error_message)
+            raise GraphSpecError(error_message)
 
-        source_version = source_yml['source_version'] if 'source_version' in source_yml \
-            else self.source_data_manager.get_latest_source_version(source_id)
-        if source_version is None:
-            # TODO it would be great if we could default to the last stable version already built somehow
-            error_message = f'Data source {source_id} could not determine the latest version. The service may be down.'
-            raise Exception(error_message)
+        # read version and normalization specifications from the graph spec
+        source_version = source_yml.get('source_version', None)
+        parsing_version = source_yml.get('parsing_version', None)
+        merge_strategy = source_yml.get('merge_strategy', None)
+        node_normalization_version = source_yml.get('node_normalization_version', None)
+        edge_normalization_version = source_yml.get('edge_normalization_version', None)
+        strict_normalization = source_yml.get('strict_normalization', True)
+        conflation = source_yml.get('conflation', False)
 
-        parsing_version = source_yml['parsing_version'] if 'parsing_version' in source_yml \
-            else self.source_data_manager.get_latest_parsing_version(source_id)
-        merge_strategy = source_yml['merge_strategy'] if 'merge_strategy' in source_yml else 'default'
-        node_normalization_version = source_yml['node_normalization_version'] \
-            if 'node_normalization_version' in source_yml \
-            else self.source_data_manager.get_latest_node_normalization_version()
-        edge_normalization_version = source_yml['edge_normalization_version'] \
-            if 'edge_normalization_version' in source_yml \
-            else self.source_data_manager.get_latest_edge_normalization_version()
-        strict_normalization = source_yml['strict_normalization'] \
-            if 'strict_normalization' in source_yml else True
-        normalization_code_version = source_yml['normalization_code_version'] \
-            if 'normalization_code_version' in source_yml else NORMALIZATION_CODE_VERSION
-        conflation = source_yml['conflation'] \
-            if 'conflation' in source_yml else False
+        # supplementation and normalization code version cannot be specified, set them to the current version
+        supplementation_version = SequenceVariantSupplementation.SUPPLEMENTATION_VERSION
+        normalization_code_version = NORMALIZATION_CODE_VERSION
+
+        # if normalization versions are not specified, set them to the current latest
+        # source_version is intentionally not handled here because we want to do it lazily and avoid if not needed
+        if not parsing_version or parsing_version == 'latest':
+            parsing_version = self.source_data_manager.get_latest_parsing_version(source_id)
+        if not node_normalization_version or node_normalization_version == 'latest':
+            node_normalization_version = self.source_data_manager.get_latest_node_normalization_version()
+        if not edge_normalization_version or edge_normalization_version == 'latest':
+            edge_normalization_version = self.source_data_manager.get_latest_edge_normalization_version()
+
+        # do some validation
+        if type(strict_normalization) != bool:
+            raise GraphSpecError(f'Invalid type (strict_normalization: {strict_normalization}), must be true or false.')
+        if type(conflation) != bool:
+            raise GraphSpecError(f'Invalid type (conflation: {conflation}), must be true or false.')
+        if merge_strategy == 'default':
+            merge_strategy = None
+
         normalization_scheme = NormalizationScheme(node_normalization_version=node_normalization_version,
                                                    edge_normalization_version=edge_normalization_version,
                                                    normalization_code_version=normalization_code_version,
                                                    strict=strict_normalization,
                                                    conflation=conflation)
-        supplementation_version = SequenceVariantSupplementation.SUPPLEMENTATION_VERSION
-        graph_source = DataSource(id=source_id,
-                                  version=None,  # this will get populated later in build_dependencies
-                                  source_version=source_version,
-                                  merge_strategy=merge_strategy,
-                                  normalization_scheme=normalization_scheme,
-                                  parsing_version=parsing_version,
-                                  supplementation_version=supplementation_version)
-        return graph_source
-
-    def get_graph_spec(self, graph_id: str):
-        for graph_spec in self.graph_specs:
-            if graph_spec.graph_id == graph_id:
-                return graph_spec
-        return None
+        data_source = DataSource(id=source_id,
+                                 source_version=source_version,
+                                 merge_strategy=merge_strategy,
+                                 normalization_scheme=normalization_scheme,
+                                 parsing_version=parsing_version,
+                                 supplementation_version=supplementation_version)
+        return data_source
 
     def get_graph_dir_path(self, graph_id: str, graph_version: str):
         return os.path.join(self.graphs_dir, graph_id, graph_version)
 
-    def get_graph_output_URL(self, graph_id: str, graph_version: str):
+    def get_graph_output_url(self, graph_id: str, graph_version: str):
         graph_output_url = os.environ.get('ORION_OUTPUT_URL', "https://localhost/")
         if graph_output_url[-1] != '/':
             graph_output_url += '/'
         return f'{graph_output_url}{graph_id}/{graph_version}/'
 
-    def get_graph_nodes_file_path(self, graph_output_dir: str):
+    @staticmethod
+    def get_graph_nodes_file_path(graph_output_dir: str):
         return os.path.join(graph_output_dir, NODES_FILENAME)
 
-    def get_graph_edges_file_path(self, graph_output_dir: str):
+    @staticmethod
+    def get_graph_edges_file_path(graph_output_dir: str):
         return os.path.join(graph_output_dir, EDGES_FILENAME)
 
     def check_for_existing_graph_dir(self, graph_id: str, graph_version: str):
@@ -516,61 +573,37 @@ class GraphBuilder:
     def get_graph_metadata(self, graph_id: str, graph_version: str):
         # make sure the output directory exists (where we check for existing GraphMetadata)
         graph_output_dir = self.get_graph_dir_path(graph_id, graph_version)
-        if not os.path.isdir(graph_output_dir):
-            os.makedirs(graph_output_dir)
 
         # load existing or create new metadata file
         return GraphMetadata(graph_id, graph_output_dir)
 
     @staticmethod
-    def generate_graph_version(graph_spec: GraphSpec):
-        sources_string = ''.join(
-            [json.dumps(graph_source.get_metadata_representation())
-             for graph_source in graph_spec.sources])
-        subgraphs_string = ''.join(
-            [''.join([subgraph.id, subgraph.version, subgraph.merge_strategy])
-             for subgraph in graph_spec.subgraphs])
-        graph_version = xxh64_hexdigest(sources_string + subgraphs_string)
-        return graph_version
-
-    @staticmethod
-    def init_graphs_dir():
-        # use the directory specified by the environment variable ORION_GRAPHS
-        if 'ORION_GRAPHS' in os.environ and os.path.isdir(os.environ['ORION_GRAPHS']):
+    def get_graphs_dir():
+        # confirm the directory specified by the environment variable ORION_GRAPHS is valid
+        graphs_dir = os.environ.get('ORION_GRAPHS', None)
+        if graphs_dir and Path(graphs_dir).is_dir():
             return os.environ['ORION_GRAPHS']
-        else:
-            # if graph dir is invalid or not specified back out
-            raise IOError(
-                'GraphBuilder graphs directory not found. '
-                'Specify a valid directory with environment variable ORION_GRAPHS.')
+
+        # if invalid or not specified back out
+        raise IOError('ORION graphs directory not configured properly. '
+                      'Specify a valid directory with environment variable ORION_GRAPHS.')
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="Merge data source files into complete graphs.")
+    parser = argparse.ArgumentParser(description="Merge data sources into complete graphs.")
     parser.add_argument('graph_id',
                         help='ID of the graph to build. Must match an ID from the configured Graph Spec.')
-    parser.add_argument('-v', '--version',
-                        action='store_true',
-                        help='Only retrieve a generated version for graphs from the graph spec.')
     args = parser.parse_args()
     graph_id_arg = args.graph_id
-    retrieve_version = args.version
 
     graph_builder = GraphBuilder()
     if graph_id_arg == "all":
-        if retrieve_version:
-            graph_versions = [graph_spec.graph_version for graph_spec in graph_builder.graph_specs]
-            print('\n'.join(graph_versions))
-        else:
-            for g_id in [graph_spec.graph_id for graph_spec in graph_builder.graph_specs]:
-                graph_builder.build_graph(g_id)
+        for graph_spec in graph_builder.graph_specs.values():
+            graph_builder.build_graph(graph_spec)
     else:
-        graph_spec = graph_builder.get_graph_spec(graph_id_arg)
+        graph_spec = graph_builder.graph_specs.get(graph_id_arg, None)
         if graph_spec:
-            if retrieve_version:
-                print(graph_spec.graph_version)
-            else:
-                graph_builder.build_graph(graph_id_arg)
+            graph_builder.build_graph(graph_spec)
         else:
             print(f'Invalid graph spec requested: {graph_id_arg}')
     for results_graph_id, results in graph_builder.build_results.items():

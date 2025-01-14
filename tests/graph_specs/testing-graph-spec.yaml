@@ -1,0 +1,10 @@
+# Testing graph spec
+graphs:
+  - graph_id: Testing_Graph
+    graph_name: Testing Graph
+    graph_description: 'This is a small graph spec that can be used for testing.'
+    graph_url: ''
+    output_format:
+    sources:
+      - source_id: CTD
+      - source_id: HGNC

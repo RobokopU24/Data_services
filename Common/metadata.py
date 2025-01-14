@@ -30,6 +30,8 @@ class Metadata:
         raise NotImplementedError()
 
     def save_metadata(self):
+        if not os.path.isdir(os.path.dirname(self.metadata_file_path)):
+            os.makedirs(os.path.dirname(self.metadata_file_path))
         with open(self.metadata_file_path, 'w') as meta_json_file:
             json.dump(self.metadata, meta_json_file, indent=4)
 
@@ -295,18 +297,6 @@ class SourceMetadata(Metadata):
         except KeyError:
             return False
 
-    def get_release_version(self,
-                            parsing_version: str,
-                            normalization_version: str,
-                            supplementation_version: str):
-        if "releases" in self.metadata:
-            for release_version, release in self.metadata["releases"].items():
-                if ((release["parsing_version"] == parsing_version) and
-                        (release["normalization_version"] == normalization_version) and
-                        (release["supplementation_version"] == supplementation_version)):
-                    return release_version
-        return None
-
     def generate_release_metadata(self,
                                   parsing_version: str,
                                   normalization_version: str,
@@ -314,12 +304,11 @@ class SourceMetadata(Metadata):
                                   source_meta_information: dict):
         if "releases" not in self.metadata:
             self.metadata["releases"] = {}
-        release_info = "".join([self.source_id,
-                                self.source_version,
-                                parsing_version,
-                                normalization_version,
-                                supplementation_version])
-        release_version = xxh64_hexdigest(release_info)
+        release_version = get_source_release_version(self.source_id,
+                                                     self.source_version,
+                                                     parsing_version,
+                                                     normalization_version,
+                                                     supplementation_version)
         if release_version not in self.metadata["releases"]:
             self.metadata["releases"][release_version] = {
                 "source_version": self.source_version,
@@ -329,31 +318,22 @@ class SourceMetadata(Metadata):
             }
         self.metadata["releases"][release_version].update(source_meta_information)
         self.save_metadata()
+        return release_version
 
     def get_release_info(self, release_version: str):
         if 'releases' in self.metadata and release_version in self.metadata['releases']:
             return self.metadata['releases'][release_version]
+        return None
 
-    '''
-    these need to be updated for the new versioning format, but we may not need them
-    def get_final_node_count(self):
-        try:
-            node_count = 0
-            node_count += self.metadata['normalization_info']['final_normalized_nodes']
-            if self.has_supplemental_data():
-                node_count += self.metadata['supplementation_info']['normalization_info']['final_normalized_nodes']
-            return node_count
-        except KeyError as k:
-            raise RuntimeError(f'Required metadata was not available: {k}')
 
-    def get_final_edge_count(self):
-        try:
-            node_count = 0
-            node_count += self.metadata['normalization_info']['final_normalized_edges']
-            if self.has_supplemental_data():
-                node_count += self.metadata['supplementation_info']['normalization_info']['final_normalized_edges']
-            return node_count
-        except KeyError as k:
-            raise RuntimeError(f'Required metadata was not available: {k}')
-    '''
-
+def get_source_release_version(source_id,
+                               source_version,
+                               parsing_version,
+                               normalization_version,
+                               supplementation_version):
+    release_string = "_".join([source_id,
+                              source_version,
+                              parsing_version,
+                              normalization_version,
+                              supplementation_version])
+    return xxh64_hexdigest(release_string)

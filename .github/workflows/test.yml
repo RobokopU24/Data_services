@@ -16,12 +16,13 @@ jobs:
 
       - name: create env params
         run: |
-          echo "PYTHONPATH=$PWD:$PWD/robokop-genetics" >> $GITHUB_ENV
           echo "ROBOKOP_HOME=$PWD" >> $GITHUB_ENV
-          mkdir -p $PWD/tests/logs
-          mkdir -p $PWD/tests/storage
-          echo "ORION_LOGS=$PWD/tests/logs" >> $GITHUB_ENV
-          echo "ORION_STORAGE=$PWD/tests/storage" >> $GITHUB_ENV
+          mkdir -p $PWD/tests/workspace/logs
+          mkdir -p $PWD/tests/workspace/storage
+          mkdir -p $PWD/tests/workspace/graphs
+          echo "ORION_LOGS=$PWD/tests/workspace/logs" >> $GITHUB_ENV
+          echo "ORION_STORAGE=$PWD/tests/workspace/storage" >> $GITHUB_ENV
+          echo "ORION_GRAPHS=$PWD/tests/workspace/graphs" >> $GITHUB_ENV
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v4
